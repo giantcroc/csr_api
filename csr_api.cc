@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <iostream>
+#include <string.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
@@ -19,15 +19,18 @@ bool gen_X509Req()
 	int				nVersion = 0;
 	int				bits = 2048;
 	unsigned long	e = RSA_F4;
+    int length =0;
 
 	X509_REQ		*x509_req = NULL;
 	X509_NAME		*x509_name = NULL;
 	EVP_PKEY		*pKey = NULL;
-	BIO				*out = NULL, *bio_err = NULL;
+	BIO				*bio = NULL, *bio_err = NULL;
 
 	const char		*szCommon = "localhost";
 
 	const char		*szPath = "x509Req.pem";
+
+    char* pem=NULL;
 
      /* Add various extensions: standard extensions */
 	STACK_OF(X509_EXTENSION)  *exts = sk_X509_EXTENSION_new_null();
@@ -89,13 +92,25 @@ bool gen_X509Req()
 		goto free_all;
 	}
 
-	out = BIO_new_file(szPath,"w");
-	ret = PEM_write_bio_X509_REQ(out, x509_req);
+	bio = BIO_new(BIO_s_mem());
+	ret = PEM_write_bio_X509_REQ(bio, x509_req);
+    BUF_MEM *bptr;
+    BIO_get_mem_ptr(bio, &bptr);
+    length = bptr->length;
+    pem = (char *) malloc(length + 1);
+    if (NULL == pem) {
+        BIO_free(bio);
+        return NULL;    
+    }
 
+    memset(pem, 0, length + 1);
+    BIO_read(bio, pem, length);
+
+    printf("%s\n",pem);
 	// 6. free
 free_all:
 	X509_REQ_free(x509_req);
-	BIO_free_all(out);
+	BIO_free(bio);
 
 	EVP_PKEY_free(pKey);
 	BN_free(bne);
