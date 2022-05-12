@@ -1,8 +1,20 @@
-#include <stdio.h>
-#include <string.h>
+#define TestAlone
+#include "sgx.h"
 #include <openssl/rsa.h>
+#include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+
+typedef ByteString BYTE_STRING;
+void show_data(BYTE_STRING data)
+{
+    for(CK_ULONG i=0;i<data.byte_size;i++)
+    {
+        printf("%x ",data.bytes[i]);
+    }
+    printf("\n");
+}
+
 int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, const char* subvalue)
 {
     X509_EXTENSION  *pSubExt = NULL;
@@ -10,7 +22,7 @@ int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, const char* subvalue)
     sk_X509_EXTENSION_push(exts, pSubExt);
     return 0;
 }
-bool gen_X509Req()
+bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey)
 {
 	int				ret = 0;
 	RSA				*r = NULL;
@@ -31,6 +43,16 @@ bool gen_X509Req()
 	const char		*szPath = "x509Req.pem";
 
     char* pem=NULL;
+
+    CK_RV status = CKR_OK;
+
+    RSA* openssl_rsa = NULL;
+    BIGNUM * bn_modulus = NULL;
+    BIGNUM * bn_public_exponent = NULL;
+    int success = 0;
+
+    EVP_PKEY* evp_pkey = NULL;
+    ByteString modulus,exponent;
 
      /* Add various extensions: standard extensions */
 	STACK_OF(X509_EXTENSION)  *exts = sk_X509_EXTENSION_new_null();
@@ -92,6 +114,30 @@ bool gen_X509Req()
 		goto free_all;
 	}
 
+    status = sgxcontext.GetPublicKey(pubkey,&modulus,&exponent);
+    if (status != CKR_OK) {
+        printf("Error get pubkey\n");
+    } 
+    else{
+        show_data(modulus);
+        show_data(exponent);
+    }
+
+    openssl_rsa = RSA_new();
+     bn_modulus = BN_bin2bn(modulus.bytes, static_cast<int>(modulus.byte_size), nullptr);
+     bn_public_exponent = BN_bin2bn(exponent.bytes,
+                                        static_cast<int>(exponent.byte_size),
+                                        nullptr);
+     success = RSA_set0_key(openssl_rsa, bn_modulus, bn_public_exponent, nullptr);
+
+     evp_pkey = EVP_PKEY_new();
+
+    /* Add public key to certificate request */
+    EVP_PKEY_assign(evp_pkey, EVP_PKEY_RSA, openssl_rsa);
+
+    X509_REQ_set_pubkey(x509_req, evp_pkey);
+    EVP_PKEY_free(evp_pkey);
+
 	bio = BIO_new(BIO_s_mem());
 	ret = PEM_write_bio_X509_REQ(bio, x509_req);
     BUF_MEM *bptr;
@@ -117,9 +163,41 @@ free_all:
 
 	return (ret == 1);
 }
-
-int main(int argc, char* argv[]) 
+int main()
 {
-	gen_X509Req();
-	return 0;
+    std::string libpath="/usr/local/lib/libp11sgx.so";
+    std::string tokenlabel="my_token_label";
+    std::string so_pin="my_so_pin";
+    std::string user_pin="my_usr_pin";
+    std::string keylabel="rsa";
+    std::string ecparam="P-256";
+    CK_RV status = CKR_OK;
+    CK_OBJECT_HANDLE privkey;
+    CK_OBJECT_HANDLE pubkey;
+    CK_ULONG object_count =0;
+
+    SGXContext sgxcontext(libpath,tokenlabel,so_pin,user_pin);
+    status = sgxcontext.SGXInit();
+    if (status != CKR_OK) {
+        return 0;
+    } 
+
+    status = sgxcontext.FindKeyPair(&privkey, &pubkey, keylabel,object_count);
+    if (status != CKR_OK) {
+        return 0;
+    } 
+    if(object_count==0)
+    {
+        status = sgxcontext.CreateRSAKeyPair(&privkey, &pubkey, keylabel,2048,true);
+        if (status != CKR_OK) {
+            return 0;
+        } 
+    }
+    else if(object_count>1)
+    {
+        return 0;
+    }
+    gen_X509Req(sgxcontext,pubkey);
+
+    return 0;
 }
