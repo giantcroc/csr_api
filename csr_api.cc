@@ -4,6 +4,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+#include <openssl/x509.h>
 
 typedef ByteString BYTE_STRING;
 void show_data(BYTE_STRING data)
@@ -15,14 +16,14 @@ void show_data(BYTE_STRING data)
     printf("\n");
 }
 
-int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, const char* subvalue)
+int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, char* subvalue)
 {
     X509_EXTENSION  *pSubExt = NULL;
     pSubExt = X509V3_EXT_conf_nid(NULL, NULL, nid, subvalue);
     sk_X509_EXTENSION_push(exts, pSubExt);
     return 0;
 }
-bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey)
+bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE privkey)
 {
 	int				ret = 0;
 	RSA				*r = NULL;
@@ -52,7 +53,12 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey)
     int success = 0;
 
     EVP_PKEY* evp_pkey = NULL;
-    ByteString modulus,exponent;
+    ByteString modulus,exponent,signed_data;
+    int req_info_size=0;
+    ASN1_BIT_STRING* asn1_signature =NULL;
+    X509_ALGOR* x509_algor=NULL;
+    ASN1_OBJECT * a=NULL;
+    unsigned char* buffer =NULL;
 
      /* Add various extensions: standard extensions */
 	STACK_OF(X509_EXTENSION)  *exts = sk_X509_EXTENSION_new_null();
@@ -108,20 +114,10 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey)
 		goto free_all;
 	}
 
-	// 5. set sign key of x509 req
-	ret = X509_REQ_sign(x509_req, pKey, EVP_sha256());	// return x509_req->signature->length
-	if (ret <= 0){
-		goto free_all;
-	}
-
     status = sgxcontext.GetPublicKey(pubkey,&modulus,&exponent);
     if (status != CKR_OK) {
         printf("Error get pubkey\n");
     } 
-    else{
-        show_data(modulus);
-        show_data(exponent);
-    }
 
     openssl_rsa = RSA_new();
      bn_modulus = BN_bin2bn(modulus.bytes, static_cast<int>(modulus.byte_size), nullptr);
@@ -137,6 +133,25 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey)
 
     X509_REQ_set_pubkey(x509_req, evp_pkey);
     EVP_PKEY_free(evp_pkey);
+
+    /* Sign certificate request with smart card */
+    req_info_size = i2d_re_X509_REQ_tbs(x509_req, &buffer);
+    
+    status = sgxcontext.RSASign(privkey,pubkey,false,256,buffer,req_info_size,&signed_data);
+
+    asn1_signature = ASN1_BIT_STRING_new();
+
+    ASN1_BIT_STRING_set(asn1_signature, signed_data.bytes, signed_data.byte_size);
+    x509_algor = X509_ALGOR_new();
+    a = OBJ_nid2obj(NID_sha256WithRSAEncryption);
+    X509_ALGOR_set0(x509_algor, a, V_ASN1_NULL, nullptr);
+
+    X509_REQ_set1_signature_algo(x509_req, x509_algor);
+    X509_ALGOR_free(x509_algor);
+
+    asn1_signature->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
+    asn1_signature->flags |= ASN1_STRING_FLAG_BITS_LEFT;
+    X509_REQ_set0_signature(x509_req, asn1_signature);
 
 	bio = BIO_new(BIO_s_mem());
 	ret = PEM_write_bio_X509_REQ(bio, x509_req);
