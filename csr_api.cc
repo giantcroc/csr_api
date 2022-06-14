@@ -16,14 +16,13 @@ void show_data(BYTE_STRING data)
     printf("\n");
 }
 
-int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, char* subvalue)
+int add_ext(STACK_OF(X509_EXTENSION) *exts, int nid, const char* subvalue)
 {
-    X509_EXTENSION  *pSubExt = NULL;
-    pSubExt = X509V3_EXT_conf_nid(NULL, NULL, nid, subvalue);
+    X509_EXTENSION  *pSubExt = X509V3_EXT_nconf_nid(NULL, NULL, nid, subvalue);
     sk_X509_EXTENSION_push(exts, pSubExt);
     return 0;
 }
-bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE privkey)
+bool gen_X509Req(SGXContext* sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE privkey)
 {
 	int				ret = 0;
 	RSA				*r = NULL;
@@ -33,15 +32,18 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
 	int				bits = 2048;
 	unsigned long	e = RSA_F4;
     int length =0;
+    BIO* bio=NULL;
 
 	X509_REQ		*x509_req = NULL;
 	X509_NAME		*x509_name = NULL;
 	EVP_PKEY		*pKey = NULL;
-	BIO				*bio = NULL, *bio_err = NULL;
 
 	const char		*szCommon = "localhost";
 
-	const char		*szPath = "x509Req.pem";
+  const char		*ca = "CA:FALSE";
+  const char		*keyusage = "Digital Signature,Non Repudiation,Key Encipherment";
+  const char		*extkeyusage = "TLS Web Client Authentication, TLS Web Server Authentication";
+  const char		*altname = "IP:127.0.0.1,IP:::1";
 
     char* pem=NULL;
 
@@ -50,13 +52,12 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
     RSA* openssl_rsa = NULL;
     BIGNUM * bn_modulus = NULL;
     BIGNUM * bn_public_exponent = NULL;
-    int success = 0;
 
     EVP_PKEY* evp_pkey = NULL;
     ByteString modulus,exponent,signed_data;
     int req_info_size=0;
     ASN1_BIT_STRING* asn1_signature =NULL;
-    X509_ALGOR* x509_algor=NULL;
+    // X509_ALGOR* x509_algor=NULL;
     ASN1_OBJECT * a=NULL;
     unsigned char* buffer =NULL;
 
@@ -66,39 +67,39 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
 	// 1. generate rsa key
 	bne = BN_new();
 	ret = BN_set_word(bne,e);
-	if(ret != 1){
-		goto free_all;
-	}
+	// if(ret != 1){
+	// 	goto free_all;
+	// }
 
 	r = RSA_new();
 	ret = RSA_generate_key_ex(r, bits, bne, NULL);
-	if(ret != 1){
-		goto free_all;
-	}
+	// if(ret != 1){
+	// 	goto free_all;
+	// }
 
 	// 2. set version of x509 req
 	x509_req = X509_REQ_new();
 	ret = X509_REQ_set_version(x509_req, nVersion);
-	if (ret != 1){
-		goto free_all;
-	}
+	// if (ret != 1){
+	// 	goto free_all;
+	// }
 
 	// 3. set subject of x509 req
 	x509_name = X509_REQ_get_subject_name(x509_req);
 
-	ret = X509_NAME_add_entry_by_txt(x509_name,"CN", MBSTRING_ASC, (const unsigned char*)szCommon, -1, -1, 0);
-	if (ret != 1){
-		goto free_all;
-	}
+	ret = X509_NAME_add_entry_by_txt(x509_name,"CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(szCommon), -1, -1, 0);
+	// if (ret != 1){
+	// 	goto free_all;
+	// }
 
 	/* Standard extenions */
-	add_ext(exts, NID_basic_constraints, "CA:FALSE");
+	add_ext(exts, NID_basic_constraints, ca);
 
-	add_ext(exts, NID_key_usage, "Digital Signature,Non Repudiation,Key Encipherment");
+	add_ext(exts, NID_key_usage, keyusage);
     
-    add_ext(exts, NID_ext_key_usage, "TLS Web Client Authentication, TLS Web Server Authentication");
+    add_ext(exts, NID_ext_key_usage, extkeyusage);
 
-    add_ext(exts, NID_subject_alt_name, "IP:127.0.0.1,IP:::1");
+    add_ext(exts, NID_subject_alt_name, altname);
 
     X509_REQ_add_extensions(x509_req, exts);
 
@@ -110,11 +111,11 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
 	r = NULL;	// will be free rsa when EVP_PKEY_free(pKey)
 
 	ret = X509_REQ_set_pubkey(x509_req, pKey);
-	if (ret != 1){
-		goto free_all;
-	}
+	// if (ret != 1){
+	// 	goto free_all;
+	// }
 
-    status = sgxcontext.GetPublicKey(pubkey,&modulus,&exponent);
+    status = sgxcontext->GetPublicKey(pubkey,&modulus,&exponent);
     if (status != CKR_OK) {
         printf("Error get pubkey\n");
     } 
@@ -124,41 +125,43 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
      bn_public_exponent = BN_bin2bn(exponent.bytes,
                                         static_cast<int>(exponent.byte_size),
                                         nullptr);
-     success = RSA_set0_key(openssl_rsa, bn_modulus, bn_public_exponent, nullptr);
-
+     RSA_set0_key(openssl_rsa, bn_modulus, bn_public_exponent, nullptr);
+    
      evp_pkey = EVP_PKEY_new();
 
     /* Add public key to certificate request */
     EVP_PKEY_assign(evp_pkey, EVP_PKEY_RSA, openssl_rsa);
-
+    EC_KEY_set_group
     X509_REQ_set_pubkey(x509_req, evp_pkey);
     EVP_PKEY_free(evp_pkey);
 
     /* Sign certificate request with smart card */
     req_info_size = i2d_re_X509_REQ_tbs(x509_req, &buffer);
     
-    status = sgxcontext.RSASign(privkey,pubkey,false,256,buffer,req_info_size,&signed_data);
+    status = sgxcontext->RSASign(privkey,pubkey,false,256,buffer,req_info_size,&signed_data);
 
     asn1_signature = ASN1_BIT_STRING_new();
 
     ASN1_BIT_STRING_set(asn1_signature, signed_data.bytes, signed_data.byte_size);
-    x509_algor = X509_ALGOR_new();
+    // x509_algor = X509_ALGOR_new();
     a = OBJ_nid2obj(NID_sha256WithRSAEncryption);
-    X509_ALGOR_set0(x509_algor, a, V_ASN1_NULL, nullptr);
+    X509_ALGOR_set0(x509_req->sig_alg, a, V_ASN1_NULL, nullptr);
 
-    X509_REQ_set1_signature_algo(x509_req, x509_algor);
-    X509_ALGOR_free(x509_algor);
+    // // X509_REQ_set1_signature_algo(x509_req, x509_algor);
+    // X509_ALGOR_copy(&x509_req->sig_alg, x509_algor);
+    // X509_ALGOR_free(x509_algor);
 
     asn1_signature->flags &= ~(ASN1_STRING_FLAG_BITS_LEFT | 0x07);
     asn1_signature->flags |= ASN1_STRING_FLAG_BITS_LEFT;
-    X509_REQ_set0_signature(x509_req, asn1_signature);
+    // X509_REQ_set0_signature(x509_req, asn1_signature);
+    x509_req->signature = asn1_signature;
 
 	bio = BIO_new(BIO_s_mem());
 	ret = PEM_write_bio_X509_REQ(bio, x509_req);
     BUF_MEM *bptr;
     BIO_get_mem_ptr(bio, &bptr);
     length = bptr->length;
-    pem = (char *) malloc(length + 1);
+    pem = static_cast<char *>(malloc(length + 1));
     if (NULL == pem) {
         BIO_free(bio);
         return NULL;    
@@ -169,7 +172,7 @@ bool gen_X509Req(SGXContext& sgxcontext,CK_OBJECT_HANDLE pubkey,CK_OBJECT_HANDLE
 
     printf("%s\n",pem);
 	// 6. free
-free_all:
+// free_all:
 	X509_REQ_free(x509_req);
 	BIO_free(bio);
 
